@@ -1,0 +1,3 @@
+.direnv/
+.omo/
+secrets/*.decrypted.yaml
