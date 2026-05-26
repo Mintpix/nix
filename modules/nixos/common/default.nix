@@ -1,0 +1,6 @@
+{ flake, ... }:
+{
+  imports = [
+    ./myusers.nix
+  ];
+}
