@@ -9,6 +9,7 @@
     (flake.inputs.self + /modules/nixos/services/efi-backup.nix)
     (flake.inputs.self + /modules/nixos/hardware/nas/default.nix)
     (flake.inputs.self + /modules/nixos/services/samba.nix)
+    (flake.inputs.self + /modules/nixos/services/nspawn-box.nix)
   ];
 
   services.openssh.settings.PasswordAuthentication = true;
