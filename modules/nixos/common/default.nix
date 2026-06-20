@@ -2,5 +2,6 @@
 {
   imports = [
     ./myusers.nix
+    ./cachix.nix
   ];
 }

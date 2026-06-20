@@ -1,0 +1,180 @@
+# Auto-deploy all non-WSL hosts on push to main.
+#
+# Two jobs split by architecture, each running on a native runner:
+#   x86 (ubuntu-latest)        → Mskla, Msksg, MskNAS
+#   ARM (ubuntu-24.04-arm)     → Mskcc, Mskos, Mskse
+#
+# Each job builds the system closures locally, pushes them to Cachix, then
+# activates remotely. Remote hosts pull pre-built artifacts from Cachix
+# instead of building on-device.
+#
+# MskNAS is reached through Mskos as a jump host (ProxyJump) and waits for
+# Mskos to finish activating first.
+#
+# Required GitHub secrets:
+#   DEPLOY_SSH_KEY   — SSH private key authorized for root on all hosts
+#   CACHIX_AUTH_TOKEN — Cachix auth token for pushing
+#   HOST_IP_Mskcc    — public IP of Mskcc
+#   HOST_IP_Mskla    — public IP of Mskla
+#   HOST_IP_MskNAS   — internal IP of MskNAS (reachable from Mskos)
+#   HOST_IP_Mskos    — public IP of Mskos
+#   HOST_IP_Mskse    — public IP of Mskse
+#   HOST_IP_Msksg    — public IP of Msksg
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      debug:
+        description: "Start a tmate session for debugging"
+        type: boolean
+        default: false
+
+jobs:
+  activate-x86:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: cachix/cachix-action@v17
+        with:
+          name: mp
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          cat > ~/.ssh/config <<'EOF'
+          Host Mskla
+            HostName ${{ secrets.HOST_IP_Mskla }}
+            User root
+            IdentityFile ~/.ssh/deploy_key
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+          Host Msksg
+            HostName ${{ secrets.HOST_IP_Msksg }}
+            User root
+            IdentityFile ~/.ssh/deploy_key
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+          Host Mskos
+            HostName ${{ secrets.HOST_IP_Mskos }}
+            User root
+            IdentityFile ~/.ssh/deploy_key
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+          Host MskNAS
+            HostName ${{ secrets.HOST_IP_MskNAS }}
+            User root
+            IdentityFile ~/.ssh/deploy_key
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+            ProxyJump Mskos
+          EOF
+
+      - name: Build & push x86 closures to Cachix
+        run: |
+          nix build .#nixosConfigurations.Mskla.config.system.build.toplevel
+          nix build .#nixosConfigurations.Msksg.config.system.build.toplevel
+          nix build .#nixosConfigurations.MskNAS.config.system.build.toplevel
+
+      - name: Activate Mskla & Msksg in parallel
+        run: |
+          nix run .#activate Mskla &
+          nix run .#activate Msksg &
+          wait -n || exit 1
+          wait || exit 1
+
+      - name: Setup tmate session
+        if: ${{ github.event.inputs.debug == 'true' }}
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
+
+  activate-arm:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: cachix/cachix-action@v17
+        with:
+          name: mp
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          cat > ~/.ssh/config <<'EOF'
+          Host Mskcc
+            HostName ${{ secrets.HOST_IP_Mskcc }}
+            User root
+            IdentityFile ~/.ssh/deploy_key
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+          Host Mskos
+            HostName ${{ secrets.HOST_IP_Mskos }}
+            User root
+            IdentityFile ~/.ssh/deploy_key
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+          Host Mskse
+            HostName ${{ secrets.HOST_IP_Mskse }}
+            User root
+            IdentityFile ~/.ssh/deploy_key
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+          Host MskNAS
+            HostName ${{ secrets.HOST_IP_MskNAS }}
+            User root
+            IdentityFile ~/.ssh/deploy_key
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+            ProxyJump Mskos
+          EOF
+
+      - name: Build & push ARM closures to Cachix
+        run: |
+          nix build .#nixosConfigurations.Mskcc.config.system.build.toplevel
+          nix build .#nixosConfigurations.Mskos.config.system.build.toplevel
+          nix build .#nixosConfigurations.Mskse.config.system.build.toplevel
+
+      - name: Activate Mskcc, Mskos & Mskse in parallel
+        run: |
+          nix run .#activate Mskcc &
+          nix run .#activate Mskos &
+          os_pid=$!
+          nix run .#activate Mskse &
+          pids=($!)
+
+          # Wait for Mskos, then probe & activate MskNAS via jump host.
+          wait "$os_pid" || exit 1
+          for i in $(seq 1 12); do
+            if ssh -o ConnectTimeout=5 MskNAS 'echo ok' >/dev/null 2>&1; then break; fi
+            echo "MskNAS unreachable via Mskos (attempt $i), retrying in 10s..."
+            sleep 10
+          done
+          nix run .#activate MskNAS || exit 1
+
+          for pid in "${pids[@]}"; do
+            wait "$pid" || exit 1
+          done
+
+      - name: Setup tmate session
+        if: ${{ github.event.inputs.debug == 'true' }}
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
