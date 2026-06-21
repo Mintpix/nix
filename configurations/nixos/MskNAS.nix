@@ -10,6 +10,7 @@
     (flake.inputs.self + /modules/nixos/hardware/nas/default.nix)
     (flake.inputs.self + /modules/nixos/services/samba.nix)
     (flake.inputs.self + /modules/nixos/services/webdav.nix)
+    (flake.inputs.self + /modules/nixos/services/zfs-zed.nix)
     (flake.inputs.self + /modules/nixos/services/nspawn-box.nix)
   ];
 
