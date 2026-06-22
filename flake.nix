@@ -26,6 +26,8 @@
     sops-nix.url = "github:Mic92/sops-nix";
     sops-nix.inputs.nixpkgs.follows = "nixpkgs";
 
+    nixvim.url = "github:nix-community/nixvim/nixos-25.11";  # 跟系统 nixpkgs 25.11 配套，避免版本错配
+
   };
 
   # Wired using https://nixos-unified.org/guide/autowiring

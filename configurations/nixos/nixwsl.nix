@@ -24,4 +24,8 @@
 
   nixpkgs.hostPlatform = "x86_64-linux";
   networking.hostName = "nixwsl";
+  environment.systemPackages = with pkgs; [
+    nodejs_22
+    nodePackages.npm
+  ];
 }
