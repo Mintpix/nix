@@ -1,0 +1,101 @@
+# Auto-deploy all non-WSL hosts on push to master.
+#
+# Uses a matrix strategy split by architecture, each running on a native
+# runner to avoid cross-compilation:
+#   x86 (ubuntu-latest)    → hosts discovered by deploy.sh x86
+#   ARM (ubuntu-24.04-arm) → hosts discovered by deploy.sh arm
+#
+# Each job:
+#   1. Builds system closures locally (native arch)
+#   2. Pushes closures to Cachix (deploy.sh --build --push)
+#   3. Activates remotely — hosts pull pre-built closures from Cachix
+#      instead of building on-device (deploy.sh --auto-rollback)
+#
+# Host→IP mapping is stored in sops secrets (deploy-host-ips key),
+# decrypted at runtime using the deploy SSH key converted via ssh-to-age.
+# No hostnames are hardcoded in this workflow — add/remove hosts by
+# editing hosts/*.nix and the deploy-host-ips sops secret.
+#
+# nixwsl and box are excluded (no hardware imports, not matched by arch keywords).
+# box is a nspawn container self-managed by box-activate service on MskNAS.
+#
+# Required GitHub secrets:
+#   DEPLOY_SSH_KEY    — SSH private key authorized for root on all hosts
+#   CACHIX_AUTH_TOKEN — Cachix auth token for pushing
+name: Deploy
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      debug:
+        description: "Start a tmate session for debugging"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86
+            runner: ubuntu-latest
+          - arch: arm
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: DeterminateSystems/nix-installer-action@v22
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install cachix
+        run: nix profile install nixpkgs#cachix
+
+      - name: Configure SSH
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # Convert deploy SSH key to age key for sops decryption
+          export SOPS_AGE_KEY="$(ssh-to-age -private-key < ~/.ssh/deploy_key)"
+          # Decrypt host→IP mapping from sops and generate SSH config
+          sops -d --extract '["deploy-host-ips"]' secrets/secrets.yaml |
+            while IFS='=' read -r host ip; do
+              [ -z "$host" ] && continue
+              cat >> ~/.ssh/config <<SSHCFG
+          Host $host
+            HostName $ip
+            User root
+            IdentityFile ~/.ssh/deploy_key
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+
+          SSHCFG
+            done
+
+      - name: Build & push ${{ matrix.arch }} closures to Cachix
+        run: ./deploy.sh ${{ matrix.arch }} --build --push
+
+      - name: Activate ${{ matrix.arch }} hosts (auto-rollback on failure)
+        run: ./deploy.sh ${{ matrix.arch }} --auto-rollback
+
+      - name: Setup tmate session
+        if: ${{ github.event.inputs.debug == 'true' }}
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
